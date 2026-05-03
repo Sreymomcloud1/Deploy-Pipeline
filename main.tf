@@ -23,10 +23,34 @@ resource "aws_security_group" "MySG" {
   description = "Allow SSH, App Port, and Node Exporter"
   vpc_id      = aws_default_vpc.default.id
 
-  ingress { from_port = 22;   to_port = 22;   protocol = "tcp"; cidr_blocks = ["0.0.0.0/0"] }
-  ingress { from_port = 5000; to_port = 5000; protocol = "tcp"; security_groups = [aws_security_group.alb_sg.id] }
-  ingress { from_port = 9100; to_port = 9100; protocol = "tcp"; cidr_blocks = ["0.0.0.0/0"] }
-  egress  { from_port = 0;    to_port = 0;    protocol = "-1";  cidr_blocks = ["0.0.0.0/0"] }
+  # Fixed: Semicolons replaced with standard spacing
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port       = 5000
+    to_port         = 5000
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb_sg.id]
+  }
+
+  ingress {
+    from_port   = 9100
+    to_port     = 9100
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 }
 
 resource "aws_default_vpc" "default" {}
@@ -39,7 +63,7 @@ resource "aws_launch_template" "app_lt" {
   key_name      = aws_key_pair.labsuserrr.key_name
 
   network_interfaces {
-    security_groups            = [aws_security_group.MySG.id]
+    security_groups             = [aws_security_group.MySG.id]
     associate_public_ip_address = true
   }
 
@@ -59,5 +83,3 @@ resource "aws_launch_template" "app_lt" {
   EOF
   )
 }
-
-# Auto Scaling Group + Load Balancer (refer to your project's full main.tf for complete code)
