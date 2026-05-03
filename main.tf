@@ -87,3 +87,24 @@ resource "aws_launch_template" "app_lt" {
   EOF
   )
 }
+
+# Add the missing ALB Security Group
+resource "aws_security_group" "alb_sg" {
+  name        = "ALB-Security-Group"
+  description = "Security group for the load balancer"
+  vpc_id      = aws_default_vpc.default.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
