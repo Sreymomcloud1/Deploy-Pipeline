@@ -11,28 +11,59 @@ provider "aws" {
   region = "us-east-1"
 }
 
-# Key pair for EC2
+# 1. SSH Key Pair
 resource "aws_key_pair" "labsuserrr" {
   key_name   = "labsuserrr"
-  public_key = file("${path.module}/labsuser.pub")
+  public_key = file("${path.module}/labsuser.pub") 
 }
 
-# Security group for EC2
-resource "aws_security_group" "MySG" {
-  name        = "EC2-App-SG"
-  description = "Allow SSH, App Port, and Node Exporter"
+# 2. Networking Context
+resource "aws_default_vpc" "default" {}
+
+data "aws_subnets" "default" {
+  filter {
+    name   = "vpc-id"
+    values = [aws_default_vpc.default.id]
+  }
+}
+
+# 3. Security Group for Load Balancer (Public Facing)
+resource "aws_security_group" "alb_sg" {
+  name        = "ALB-SG"
+  description = "Allow HTTP inbound traffic"
   vpc_id      = aws_default_vpc.default.id
 
-  # FIX 1: Restricting SSH to a specific CIDR (e.g., a VPN or your IP) 
-  # helps move the Security Rating toward 'A'. 
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"] # Public HTTP access is allowed
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+# 4. Security Group for EC2 (Private Application Tier)
+resource "aws_security_group" "MySG" {
+  name        = "EC2-App-SG"
+  description = "Restricted ingress for Security Rating A"
+  vpc_id      = aws_default_vpc.default.id
+
+  # FIX for Security Rating A: Restrict SSH to a private range 
+  # SonarCloud flags 0.0.0.0/0 on Port 22 as a 'B' rating or lower.
   ingress {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["10.0.0.0/8"] # Example: Internal network only
+    cidr_blocks = ["10.0.0.0/8"] 
   }
 
-  # FIX 2: Removed semicolons to fix the "Unable to parse" error
+  # Allow application traffic ONLY from the Load Balancer
   ingress {
     from_port       = 5000
     to_port         = 5000
@@ -40,11 +71,12 @@ resource "aws_security_group" "MySG" {
     security_groups = [aws_security_group.alb_sg.id]
   }
 
+  # Restrict Node Exporter to your internal VPC range
   ingress {
     from_port   = 9100
     to_port     = 9100
     protocol    = "tcp"
-    cidr_blocks = ["172.31.0.0/16"] # Restricted to VPC range
+    cidr_blocks = ["172.31.0.0/16"] 
   }
 
   egress {
@@ -55,56 +87,78 @@ resource "aws_security_group" "MySG" {
   }
 }
 
-resource "aws_default_vpc" "default" {}
-
-# Launch template
+# 5. Launch Template (Fixes Hotspot in image_fe327d.png)
 resource "aws_launch_template" "app_lt" {
-  name_prefix   = "app-launch-template-"
+  name_prefix   = "app-lt-"
   image_id      = "ami-0ec10929233384c7f" 
   instance_type = "t3.micro"
   key_name      = aws_key_pair.labsuserrr.key_name
-
+  
   network_interfaces {
     security_groups             = [aws_security_group.MySG.id]
-    # FIX 3: Set to 'false' to resolve the Hotspot in image_1969bf.png.
-    # If you need public access, keep it 'true' but mark it 'Safe' in SonarCloud.
+    # Required Fix for Hotspot: No public IP on the instance
     associate_public_ip_address = false 
   }
 
   user_data = base64encode(<<-EOF
-    #!/bin/bash
-    apt-get update -y
-    apt-get install -y docker.io
-    systemctl start docker
-    systemctl enable docker
-    usermod -aG docker ubuntu
-    docker pull 143mom/deploy-pipeline:v1.0
-    docker run --name deploy-app -d -p 5000:5000 143mom/deploy-pipeline:v1.0
-    docker run -d \
-      --name node-exporter \
-      -p 9100:9100 \
-      prom/node-exporter:latest
-  EOF
+              #!/bin/bash
+              apt-get update -y
+              apt-get install -y docker.io
+              systemctl start docker
+              usermod -aG docker ubuntu
+              docker pull 143mom/deploy-pipeline:v1.0
+              docker run --name deploy-app -d -p 5000:5000 143mom/deploy-pipeline:v1.0
+              EOF
   )
 }
 
-# Add the missing ALB Security Group
-resource "aws_security_group" "alb_sg" {
-  name        = "ALB-Security-Group"
-  description = "Security group for the load balancer"
-  vpc_id      = aws_default_vpc.default.id
+# 6. Load Balancer Configuration (The "Public" Gate)
+resource "aws_lb" "app_lb" {
+  name               = "app-load-balancer"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb_sg.id]
+  subnets            = data.aws_subnets.default.ids
+}
 
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+resource "aws_lb_target_group" "app_tg" {
+  name     = "app-target-group"
+  port     = 5000
+  protocol = "HTTP"
+  vpc_id   = aws_default_vpc.default.id
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+  health_check {
+    path = "/"
+    port = "5000"
   }
+}
+
+resource "aws_lb_listener" "app_listener" {
+  load_balancer_arn = aws_lb.app_lb.arn
+  port              = "80"
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.app_tg.arn
+  }
+}
+
+# 7. Auto Scaling Group
+resource "aws_autoscaling_group" "app_asg" {
+  name                = "app-asg"
+  vpc_zone_identifier = data.aws_subnets.default.ids
+  target_group_arns   = [aws_lb_target_group.app_tg.arn]
+  min_size            = 1
+  max_size            = 2
+
+  launch_template {
+    id      = aws_launch_template.app_lt.id
+    version = "$Latest"
+  }
+}
+
+# Output
+output "website_url" {
+  value = "http://${aws_lb.app_lb.dns_name}"
 }
